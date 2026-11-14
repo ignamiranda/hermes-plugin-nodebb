@@ -31,14 +31,18 @@ INVALID_SESSION = "event:invalid_session"
 
 
 class NodeBBSocketListener:
-    def __init__(self, client, on_chat_message):
+    def __init__(self, client, on_chat_message, on_reconnect=None):
         """client: NodeBBClient (already logged in).
         on_chat_message: async callable(room_id, from_uid, message_dict).
         message_dict is the payload's message object when present; when
         the payload carries only an id, the message is fetched via REST.
+        on_reconnect: optional async callable run on every connect after
+        the first (the adapter hooks its offline catch-up there).
         """
         self._client = client
         self._on_chat_message = on_chat_message
+        self._on_reconnect = on_reconnect
+        self._connect_count = 0
         self._sio = socketio.AsyncClient(reconnection=True, logger=False)
         self._seen_mids: set = set()
         self._register_handlers()
@@ -64,7 +68,10 @@ class NodeBBSocketListener:
 
         @sio.on("connect")
         async def _on_connect():
-            logger.info("nodebb socket: connected")
+            self._connect_count += 1
+            logger.info("nodebb socket: connected (x%s)", self._connect_count)
+            if self._connect_count > 1 and self._on_reconnect is not None:
+                await self._on_reconnect()
 
         @sio.on("disconnect")
         async def _on_disconnect():

@@ -67,6 +67,18 @@ def env_enablement_fn():
     return (extra, home) if home else (extra, None)
 
 
+def html_to_text(content: str) -> str:
+    """NodeBB chat content is stored as parsed HTML (verified live:
+    '<p dir="auto">text</p>'). Convert to plain text for the agent."""
+    import html
+    import re
+
+    text = re.sub(r"<br\s*/?>", "\n", content or "")
+    text = re.sub(r"</p>\s*<p[^>]*>", "\n\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    return html.unescape(text).strip()
+
+
 def chunk_text(text: str, limit: int = MAX_MESSAGE_LENGTH) -> list:
     """Split text into <= limit chunks, preferring newline/space breaks."""
     chunks = []
@@ -122,6 +134,7 @@ class NodeBBAdapter(BasePlatformAdapter):
         self.listener = None
         self._bot_uid = None
         self._pipeline_task = None
+        self._last_seen: dict = self._load_state()
         import asyncio
 
         self.inbound_queue: asyncio.Queue = asyncio.Queue()
@@ -154,7 +167,9 @@ class NodeBBAdapter(BasePlatformAdapter):
         except ImportError:
             from nodebb_socket import NodeBBSocketListener
 
-        self.listener = NodeBBSocketListener(self.client, self._on_socket_chat)
+        self.listener = NodeBBSocketListener(
+            self.client, self._on_socket_chat, on_reconnect=self._on_socket_reconnect
+        )
         try:
             await self.listener.start()
         except Exception as exc:
@@ -165,7 +180,78 @@ class NodeBBAdapter(BasePlatformAdapter):
         import asyncio
 
         self._pipeline_task = asyncio.create_task(self._pipeline_loop())
+        # Ticket #6: replay anything that arrived while we were down.
+        asyncio.create_task(self._catchup())
         return True
+
+    async def _on_socket_reconnect(self) -> None:
+        import asyncio
+
+        asyncio.create_task(self._catchup())
+
+    # -- offline catch-up (ticket #6) -------------------------------------
+
+    def _state_path(self):
+        import os
+        from pathlib import Path
+
+        home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+        return home / "nodebb_catchup.json"
+
+    def _load_state(self) -> dict:
+        import json
+
+        try:
+            return json.loads(self._state_path().read_text())
+        except Exception:
+            return {}
+
+    def _save_state(self) -> None:
+        import json
+
+        try:
+            path = self._state_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(self._last_seen))
+        except Exception as exc:
+            logger.debug("nodebb: catch-up state save failed: %s", exc)
+
+    async def _catchup(self) -> None:
+        """Fetch messages newer than the per-room watermark and feed
+        them into the inbound pipeline, oldest first. First run for a
+        room only seeds the watermark — history is not replayed."""
+        if self.client is None:
+            return
+        try:
+            rooms = await self.client.get_chats()
+        except Exception as exc:
+            logger.error("nodebb: catch-up room list failed: %s", exc)
+            return
+        for room in rooms:
+            room_id = str(room.get("roomId"))
+            try:
+                messages = await self.client.get_chat_messages(room_id, per_page=50)
+            except Exception as exc:
+                logger.error("nodebb: catch-up fetch room %s failed: %s", room_id, exc)
+                continue
+            if not messages:
+                continue
+            max_mid = max(int(m.get("mid", 0)) for m in messages)
+            watermark = self._last_seen.get(room_id)
+            if watermark is None:
+                self._last_seen[room_id] = max_mid
+                continue
+            missed = [
+                m
+                for m in messages
+                if int(m.get("mid", 0)) > watermark
+                and not m.get("deleted")
+                and str(m.get("fromuid")) != str(self._bot_uid)
+            ]
+            for m in sorted(missed, key=lambda x: int(x.get("mid", 0))):
+                await self.inbound_queue.put((room_id, m.get("fromuid"), m))
+            self._last_seen[room_id] = max_mid
+        self._save_state()
 
     async def _on_socket_chat(self, room_id, from_uid, message) -> None:
         logger.info("nodebb: chat event room=%s from_uid=%s", room_id, from_uid)
@@ -190,11 +276,20 @@ class NodeBBAdapter(BasePlatformAdapter):
     async def _process_inbound(self, room_id, from_uid, message) -> None:
         if not isinstance(message, dict):
             return
+        # Advance the catch-up watermark for everything seen, including
+        # messages the filters below drop — "seen" is not "answered".
+        try:
+            mid_int = int(message.get("mid", 0))
+            if mid_int > int(self._last_seen.get(str(room_id), 0)):
+                self._last_seen[str(room_id)] = mid_int
+                self._save_state()
+        except (TypeError, ValueError):
+            pass
         if self._bot_uid is not None and str(from_uid) == str(self._bot_uid):
             return  # own message (the socket listener also self-filters)
         if message.get("system"):
             return  # join/leave and other system messages are not turns
-        content = (message.get("content") or "").strip()
+        content = html_to_text(message.get("content") or "")
         if not content:
             return
         # Default-deny allowlist: with no allowlist configured, nobody is
