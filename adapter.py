@@ -81,6 +81,10 @@ class NodeBBAdapter(BasePlatformAdapter):
         self._config = config
         self._base_url = (_extra(config, "base_url") or "").rstrip("/")
         self.client = None
+        self.listener = None
+        import asyncio
+
+        self.inbound_queue: asyncio.Queue = asyncio.Queue()
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         # Ticket #2: build the REST client and do the session login.
@@ -101,11 +105,32 @@ class NodeBBAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.error("nodebb: login failed: %s", exc)
             return False
+        # Ticket #3: start the socket listener. Inbound events land on
+        # self.inbound_queue; the pipeline that turns them into Hermes
+        # turns is ticket #4.
+        try:
+            from .nodebb_socket import NodeBBSocketListener
+        except ImportError:
+            from nodebb_socket import NodeBBSocketListener
+
+        self.listener = NodeBBSocketListener(self.client, self._on_socket_chat)
+        try:
+            await self.listener.start()
+        except Exception as exc:
+            logger.error("nodebb: socket connect failed: %s", exc)
+            return False
         self._mark_connected()
-        logger.info("nodebb adapter connected (session login ok)")
+        logger.info("nodebb adapter connected (login + socket ok)")
         return True
 
+    async def _on_socket_chat(self, room_id, from_uid, message) -> None:
+        logger.info("nodebb: chat event room=%s from_uid=%s", room_id, from_uid)
+        await self.inbound_queue.put((room_id, from_uid, message))
+
     async def disconnect(self) -> None:
+        if getattr(self, "listener", None) is not None:
+            await self.listener.stop()
+            self.listener = None
         if self.client is not None:
             await self.client.close()
             self.client = None
