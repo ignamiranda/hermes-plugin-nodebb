@@ -67,13 +67,50 @@ def env_enablement_fn():
     return (extra, home) if home else (extra, None)
 
 
-async def standalone_sender(extra, chat_id, text):
-    """Cron / send_message entry point before a live adapter exists.
+def chunk_text(text: str, limit: int = MAX_MESSAGE_LENGTH) -> list:
+    """Split text into <= limit chunks, preferring newline/space breaks."""
+    chunks = []
+    rest = text or ""
+    while len(rest) > limit:
+        cut = rest.rfind("\n", 0, limit + 1)
+        if cut < limit // 2:
+            cut = rest.rfind(" ", 0, limit + 1)
+        if cut < 1:
+            cut = limit
+        chunks.append(rest[:cut])
+        rest = rest[cut:].lstrip("\n ")
+    if rest:
+        chunks.append(rest)
+    return chunks
 
-    Ticket #1 skeleton: reports not-implemented honestly. The live send
-    path lands with the REST client ticket.
-    """
-    return SendResult(success=False, error="nodebb: send not implemented yet")
+
+async def standalone_sender(extra, chat_id, text):
+    """Cron / send_message entry point: build a short-lived client from
+    the platform config extra, log in, and send (chunked at the NodeBB
+    1,000-char cap)."""
+    try:
+        from .nodebb_client import NodeBBClient
+    except ImportError:
+        from nodebb_client import NodeBBClient
+
+    extra = extra or {}
+    client = NodeBBClient(
+        base_url=(extra.get("base_url") or "").rstrip("/"),
+        username=extra.get("username") or "",
+        password=extra.get("password") or "",
+        token=extra.get("token"),
+    )
+    try:
+        await client.login()
+        result = None
+        for chunk in chunk_text(text):
+            result = await client.send_chat_message(chat_id, chunk)
+        mid = (result or {}).get("mid")
+        return SendResult(success=True, message_id=str(mid) if mid is not None else None)
+    except Exception as exc:
+        return SendResult(success=False, error=f"nodebb: {exc}")
+    finally:
+        await client.close()
 
 
 class NodeBBAdapter(BasePlatformAdapter):
@@ -195,12 +232,41 @@ class NodeBBAdapter(BasePlatformAdapter):
         self._mark_disconnected()
 
     async def send(self, chat_id, text, **kwargs) -> SendResult:
-        return SendResult(success=False, error="nodebb: send not implemented yet")
+        # The gateway chunks long replies at the registered
+        # max_message_length (1,000); the client paces sends per room.
+        if self.client is None:
+            return SendResult(success=False, error="nodebb: not connected")
+        try:
+            result = await self.client.send_chat_message(chat_id, text)
+        except Exception as exc:
+            return SendResult(success=False, error=f"nodebb: {exc}")
+        mid = (result or {}).get("mid")
+        return SendResult(success=True, message_id=str(mid) if mid is not None else None)
 
     async def send_typing(self, chat_id) -> None:
+        # Best-effort: the typing endpoint's live behaviour is unverified,
+        # so failures are swallowed — a reply must never fail because a
+        # typing indicator did.
+        if self.client is None:
+            return None
+        try:
+            await self.client.send_typing(chat_id)
+        except Exception as exc:
+            logger.debug("nodebb: typing failed for room %s: %s", chat_id, exc)
         return None
 
     async def get_chat_info(self, chat_id) -> dict:
+        if self.client is not None:
+            try:
+                for room in await self.client.get_chats():
+                    if str(room.get("roomId")) == str(chat_id):
+                        return {
+                            "name": room.get("roomName") or str(chat_id),
+                            "type": "group" if room.get("groupChat") else "dm",
+                            "chat_id": str(chat_id),
+                        }
+            except Exception as exc:
+                logger.debug("nodebb: get_chat_info lookup failed: %s", exc)
         return {"name": str(chat_id), "type": "dm", "chat_id": str(chat_id)}
 
 
