@@ -20,6 +20,7 @@ import logging
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult
+from gateway.platforms.event import MessageEvent, MessageType
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,8 @@ class NodeBBAdapter(BasePlatformAdapter):
         self._base_url = (_extra(config, "base_url") or "").rstrip("/")
         self.client = None
         self.listener = None
+        self._bot_uid = None
+        self._pipeline_task = None
         import asyncio
 
         self.inbound_queue: asyncio.Queue = asyncio.Queue()
@@ -102,6 +105,7 @@ class NodeBBAdapter(BasePlatformAdapter):
         )
         try:
             await self.client.login()
+            self._bot_uid = await self.client.my_uid()
         except Exception as exc:
             logger.error("nodebb: login failed: %s", exc)
             return False
@@ -121,13 +125,67 @@ class NodeBBAdapter(BasePlatformAdapter):
             return False
         self._mark_connected()
         logger.info("nodebb adapter connected (login + socket ok)")
+        import asyncio
+
+        self._pipeline_task = asyncio.create_task(self._pipeline_loop())
         return True
 
     async def _on_socket_chat(self, room_id, from_uid, message) -> None:
         logger.info("nodebb: chat event room=%s from_uid=%s", room_id, from_uid)
         await self.inbound_queue.put((room_id, from_uid, message))
 
+    # -- inbound pipeline (ticket #4) ------------------------------------
+
+    def _allowed_uids(self) -> set:
+        raw = _extra(self._config, "allowed_users") or ""
+        if isinstance(raw, (list, tuple)):
+            return {str(u).strip() for u in raw if str(u).strip()}
+        return {u.strip() for u in str(raw).split(",") if u.strip()}
+
+    async def _pipeline_loop(self) -> None:
+        while True:
+            room_id, from_uid, message = await self.inbound_queue.get()
+            try:
+                await self._process_inbound(room_id, from_uid, message)
+            except Exception as exc:
+                logger.error("nodebb: inbound processing failed: %s", exc)
+
+    async def _process_inbound(self, room_id, from_uid, message) -> None:
+        if not isinstance(message, dict):
+            return
+        if self._bot_uid is not None and str(from_uid) == str(self._bot_uid):
+            return  # own message (the socket listener also self-filters)
+        if message.get("system"):
+            return  # join/leave and other system messages are not turns
+        content = (message.get("content") or "").strip()
+        if not content:
+            return
+        # Default-deny allowlist: with no allowlist configured, nobody is
+        # answered. The deployment sets NODEBB_ALLOWED_USERS to the
+        # owner's uid (the spec: Hermes answers only the owner's DMs).
+        if str(from_uid) not in self._allowed_uids():
+            logger.info("nodebb: dropped DM from non-allowlisted uid %s", from_uid)
+            return
+        from_user = message.get("fromUser") or {}
+        user_name = from_user.get("username") or message.get("username") or str(from_uid)
+        source = self.build_source(
+            chat_id=str(room_id),
+            chat_type="dm",
+            user_id=str(from_uid),
+            user_name=user_name,
+        )
+        event = MessageEvent(
+            text=content,
+            message_type=MessageType.TEXT,
+            source=source,
+            message_id=str(message.get("mid", "")),
+        )
+        await self.handle_message(event)
+
     async def disconnect(self) -> None:
+        if getattr(self, "_pipeline_task", None) is not None:
+            self._pipeline_task.cancel()
+            self._pipeline_task = None
         if getattr(self, "listener", None) is not None:
             await self.listener.stop()
             self.listener = None

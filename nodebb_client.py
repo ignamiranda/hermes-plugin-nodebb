@@ -67,6 +67,13 @@ class NodeBBClient:
         self._logged_in = True
         logger.info("nodebb: session login ok for %s", self.username)
 
+    async def my_uid(self):
+        """The logged-in account's uid. Verified live: GET /api/config
+        includes a top-level 'uid' for the authenticated user."""
+        resp = await self._http.get("/api/config", headers=self._headers())
+        resp.raise_for_status()
+        return resp.json().get("uid")
+
     @property
     def logged_in(self) -> bool:
         return self._logged_in
