@@ -42,7 +42,9 @@ class NodeBBClient:
         self.username = username
         self._password = password
         self._token = token
-        self._http = httpx.AsyncClient(base_url=self.base_url, timeout=30.0)
+        # trust_env=False: the gateway host's proxy env vars must not
+        # reroute (or break) requests to the forum.
+        self._http = httpx.AsyncClient(base_url=self.base_url, timeout=30.0, trust_env=False)
         self._csrf: str | None = None
         self._logged_in = False
         self._last_send_by_room: dict[str, float] = {}
