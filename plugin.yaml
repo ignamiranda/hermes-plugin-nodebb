@@ -1,0 +1,28 @@
+name: nodebb
+label: NodeBB
+kind: platform
+version: 0.1.0
+description: >-
+  Adds a NodeBB forum as a Hermes messaging channel. Direct chat first
+  (milestone 1); forum threads, notifications, and the rest of the NodeBB
+  surface follow as later milestones.
+author: ignamiranda
+requires_env:
+  - name: NODEBB_URL
+    description: Base URL of the NodeBB instance, e.g. https://forum.example.com/nodebb
+    prompt: NodeBB base URL
+  - name: NODEBB_USERNAME
+    description: Username of the NodeBB account Hermes acts as
+    prompt: NodeBB username
+  - name: NODEBB_PASSWORD
+    description: Password for that account (used for the session login the socket connection requires)
+    prompt: NodeBB password
+    password: true
+optional_env:
+  - name: NODEBB_TOKEN
+    description: Write API user token for the same account (used for REST calls)
+    password: true
+  - name: NODEBB_ALLOWED_USERS
+    description: Comma-separated NodeBB user ids allowed to talk to Hermes (default-deny when unset)
+  - name: NODEBB_HOME_CHANNEL
+    description: Chat room id used as the home channel for cron delivery
