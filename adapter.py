@@ -16,7 +16,6 @@ Design notes (from the project's build research):
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 
 from gateway.config import Platform, PlatformConfig
@@ -118,16 +117,9 @@ def register(ctx) -> None:
         platform_hint="NodeBB forum chat. Messages are capped at 1,000 characters and arrive as individual chat messages.",
         emoji="🌀",
     )
-    # Feature-detect optional PlatformEntry fields so the plugin still
-    # loads on older Hermes cores (register_platform API stable since
-    # v0.12.0, but newer kwargs are not present in every version).
-    try:
-        from gateway.platforms.registry import PlatformEntry
-
-        known = {f.name for f in dataclasses.fields(PlatformEntry)}
-        kwargs = {k: v for k, v in kwargs.items() if k in known or k in ("name", "label", "adapter_factory")}
-    except Exception:
-        pass
+    # Older Hermes cores may not accept every kwarg (the register_platform
+    # API is stable since v0.12.0, but newer kwargs are not present in
+    # every version), so registration falls back gracefully below.
     try:
         ctx.register_platform(standalone_sender_fn=standalone_sender, **kwargs)
     except TypeError:
