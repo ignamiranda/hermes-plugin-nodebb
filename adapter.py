@@ -78,17 +78,37 @@ async def standalone_sender(extra, chat_id, text):
 class NodeBBAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform("nodebb"))
+        self._config = config
         self._base_url = (_extra(config, "base_url") or "").rstrip("/")
+        self.client = None
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
-        # Ticket #1 skeleton: the real session login + socket connection
-        # lands in the REST client / socket listener tickets. Connecting
-        # here only marks the platform up so the gateway can list it.
+        # Ticket #2: build the REST client and do the session login.
+        # The socket listener joins in ticket #3.
+        try:
+            from .nodebb_client import NodeBBClient
+        except ImportError:
+            from nodebb_client import NodeBBClient
+
+        self.client = NodeBBClient(
+            base_url=self._base_url,
+            username=_extra(self._config, "username") or "",
+            password=_extra(self._config, "password") or "",
+            token=_extra(self._config, "token"),
+        )
+        try:
+            await self.client.login()
+        except Exception as exc:
+            logger.error("nodebb: login failed: %s", exc)
+            return False
         self._mark_connected()
-        logger.info("nodebb adapter connected (skeleton, no transport yet)")
+        logger.info("nodebb adapter connected (session login ok)")
         return True
 
     async def disconnect(self) -> None:
+        if self.client is not None:
+            await self.client.close()
+            self.client = None
         self._mark_disconnected()
 
     async def send(self, chat_id, text, **kwargs) -> SendResult:
