@@ -207,7 +207,10 @@ class NodeBBAdapter(BasePlatformAdapter):
         import asyncio
 
         while True:
-            await asyncio.sleep(120)
+            # 30s discovery cadence for brand-new rooms (was 120s until
+            # 2026-11-15 — a first message in a new room waited up to two
+            # minutes for a reply; Ignacio asked for the faster cycle).
+            await asyncio.sleep(30)
             try:
                 if self.listener is not None:
                     await self.listener.enter_rooms(await self._room_ids())
