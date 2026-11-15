@@ -105,13 +105,21 @@ class NodeBBSocketListener:
 
     async def start(self) -> None:
         origin = "{0.scheme}://{0.netloc}".format(urlparse(self._client.base_url))
+        headers = {
+            "Cookie": self._client.cookie_header(),
+            "Origin": origin,
+        }
+        # NodeBB v4's socket allowRequest also runs a CSRF check on the
+        # handshake (src/socket.io/index.js -> middleware/csrf
+        # isRequestValid): without the session's csrf token in the
+        # x-csrf-token header (or _csrf query) the handshake is 403.
+        csrf = self._client.csrf_token()
+        if csrf:
+            headers["x-csrf-token"] = csrf
         await self._sio.connect(
             origin,
             socketio_path=self._socketio_path(),
-            headers={
-                "Cookie": self._client.cookie_header(),
-                "Origin": self._client.base_url,
-            },
+            headers=headers,
             transports=["websocket", "polling"],
         )
 
