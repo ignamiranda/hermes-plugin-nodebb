@@ -89,8 +89,11 @@ class NodeBBSocketListener:
         """Join chat_room_<id> socket rooms so event:chats.receive is
         delivered (NodeBB emits it only to joined sockets)."""
         ids = [int(r) for r in room_ids if str(r).isdigit()]
-        if not ids or not self._sio.connected:
+        if not ids:
             return
+        # No self._sio.connected gate here: during the connect handler
+        # the flag may not have flipped yet, which silently skipped the
+        # join. A failed emit raises and is logged below instead.
         try:
             await self._sio.emit("modules.chats.enter", ids)
             logger.info("nodebb socket: entered chat rooms %s", ids)
@@ -143,7 +146,7 @@ class NodeBBSocketListener:
         # handshake (src/socket.io/index.js -> middleware/csrf
         # isRequestValid): without the session's csrf token in the
         # x-csrf-token header (or _csrf query) the handshake is 403.
-        csrf = self._client.csrf_token()
+        csrf = self._client.csrf_token  # property, not a method
         if csrf:
             headers["x-csrf-token"] = csrf
         await self._sio.connect(
