@@ -134,6 +134,12 @@ class NodeBBAdapter(BasePlatformAdapter):
         self.listener = None
         self._bot_uid = None
         self._pipeline_task = None
+        self._refresh_task = None
+        # Whether a catch-up state file already existed at startup.
+        # Only a first-ever run seeds unknown rooms (install-time
+        # backlog); afterwards, a room with no watermark replays from
+        # the start so first messages in new rooms are not skipped.
+        self._state_existed = self._state_path().exists()
         self._last_seen: dict = self._load_state()
         import asyncio
 
@@ -168,7 +174,10 @@ class NodeBBAdapter(BasePlatformAdapter):
             from nodebb_socket import NodeBBSocketListener
 
         self.listener = NodeBBSocketListener(
-            self.client, self._on_socket_chat, on_reconnect=self._on_socket_reconnect
+            self.client,
+            self._on_socket_chat,
+            on_reconnect=self._on_socket_reconnect,
+            room_provider=self._room_ids,
         )
         try:
             await self.listener.start()
@@ -182,7 +191,29 @@ class NodeBBAdapter(BasePlatformAdapter):
         self._pipeline_task = asyncio.create_task(self._pipeline_loop())
         # Ticket #6: replay anything that arrived while we were down.
         asyncio.create_task(self._catchup())
+        # Rooms created while connected are not joined automatically:
+        # periodically re-enter all rooms and run the REST catch-up so
+        # a first message in a brand-new room is still answered.
+        self._refresh_task = asyncio.create_task(self._room_refresh_loop())
         return True
+
+    async def _room_ids(self):
+        if self.client is None:
+            return []
+        rooms = await self.client.get_chats()
+        return [r.get("roomId") for r in rooms if r.get("roomId") is not None]
+
+    async def _room_refresh_loop(self) -> None:
+        import asyncio
+
+        while True:
+            await asyncio.sleep(120)
+            try:
+                if self.listener is not None:
+                    await self.listener.enter_rooms(await self._room_ids())
+                await self._catchup()
+            except Exception as exc:
+                logger.error("nodebb: room refresh failed: %s", exc)
 
     async def _on_socket_reconnect(self) -> None:
         import asyncio
@@ -238,9 +269,12 @@ class NodeBBAdapter(BasePlatformAdapter):
                 continue
             max_mid = max(int(m.get("mid", 0)) for m in messages)
             watermark = self._last_seen.get(room_id)
-            if watermark is None:
+            if watermark is None and not self._state_existed:
+                # First-ever run: seed only, do not replay history.
                 self._last_seen[room_id] = max_mid
                 continue
+            if watermark is None:
+                watermark = 0
             missed = [
                 m
                 for m in messages
@@ -252,6 +286,9 @@ class NodeBBAdapter(BasePlatformAdapter):
                 await self.inbound_queue.put((room_id, m.get("fromuid"), m))
             self._last_seen[room_id] = max_mid
         self._save_state()
+        # State now exists on disk: any room discovered later is new,
+        # not install-time backlog, and must replay from watermark 0.
+        self._state_existed = True
 
     async def _on_socket_chat(self, room_id, from_uid, message) -> None:
         logger.info("nodebb: chat event room=%s from_uid=%s", room_id, from_uid)

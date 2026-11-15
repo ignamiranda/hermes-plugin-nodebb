@@ -6,10 +6,14 @@ token does not work for sockets) and forwards incoming chat messages to
 a callback. The inbound pipeline (allowlist, sessions, handle_message)
 is ticket #4 — this module's job is a reliable event stream:
 
-- event name: event:chats.receive, emitted to the user's personal room
-- payload (verified from NodeBB source/reports): {roomId, fromUid,
-  message, self} — events with self == 1 are the bot's own messages and
-  are dropped here
+- event name: event:chats.receive. Delivery model verified against the
+  deployed NodeBB v4.16.8 source (src/messaging/notifications.js):
+  the event is emitted ONLY to sockets joined to `chat_room_<roomId>`.
+  A socket joins by emitting `modules.chats.enter` with the room id(s)
+  (src/socket.io/modules.js), so after every connect this listener
+  enters all rooms the bot belongs to (via the room_provider callback)
+- payload: {roomId, fromUid, message, public} — the bot's own messages
+  are filtered in the adapter pipeline by sender uid
 - reconnect replays are deduped by message id
 - event:invalid_session triggers a fresh login and reconnect
 
@@ -31,17 +35,20 @@ INVALID_SESSION = "event:invalid_session"
 
 
 class NodeBBSocketListener:
-    def __init__(self, client, on_chat_message, on_reconnect=None):
+    def __init__(self, client, on_chat_message, on_reconnect=None, room_provider=None):
         """client: NodeBBClient (already logged in).
         on_chat_message: async callable(room_id, from_uid, message_dict).
         message_dict is the payload's message object when present; when
         the payload carries only an id, the message is fetched via REST.
         on_reconnect: optional async callable run on every connect after
         the first (the adapter hooks its offline catch-up there).
+        room_provider: optional async callable returning the room ids
+        the bot belongs to; used to join chat_room_<id> socket rooms.
         """
         self._client = client
         self._on_chat_message = on_chat_message
         self._on_reconnect = on_reconnect
+        self._room_provider = room_provider
         self._connect_count = 0
         self._sio = socketio.AsyncClient(reconnection=True, logger=False)
         self._seen_mids: set = set()
@@ -70,12 +77,35 @@ class NodeBBSocketListener:
         async def _on_connect():
             self._connect_count += 1
             logger.info("nodebb socket: connected (x%s)", self._connect_count)
+            await self._enter_known_rooms()
             if self._connect_count > 1 and self._on_reconnect is not None:
                 await self._on_reconnect()
 
         @sio.on("disconnect")
         async def _on_disconnect():
             logger.info("nodebb socket: disconnected")
+
+    async def enter_rooms(self, room_ids) -> None:
+        """Join chat_room_<id> socket rooms so event:chats.receive is
+        delivered (NodeBB emits it only to joined sockets)."""
+        ids = [int(r) for r in room_ids if str(r).isdigit()]
+        if not ids or not self._sio.connected:
+            return
+        try:
+            await self._sio.emit("modules.chats.enter", ids)
+            logger.info("nodebb socket: entered chat rooms %s", ids)
+        except Exception as exc:
+            logger.error("nodebb socket: enter rooms failed: %s", exc)
+
+    async def _enter_known_rooms(self) -> None:
+        if self._room_provider is None:
+            return
+        try:
+            room_ids = await self._room_provider()
+        except Exception as exc:
+            logger.error("nodebb socket: room list for enter failed: %s", exc)
+            return
+        await self.enter_rooms(room_ids)
 
     async def _handle_receive(self, data: dict) -> None:
         if data.get("self") in (1, "1", True):
