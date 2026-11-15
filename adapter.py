@@ -363,13 +363,16 @@ class NodeBBAdapter(BasePlatformAdapter):
             self.client = None
         self._mark_disconnected()
 
-    async def send(self, chat_id, text, **kwargs) -> SendResult:
+    async def send(self, chat_id, content, **kwargs) -> SendResult:
+        # The gateway core calls send(chat_id, content, reply_to=None,
+        # metadata=None) — the second parameter MUST be named `content`;
+        # naming it `text` made every reply fail with a TypeError.
         # The gateway chunks long replies at the registered
         # max_message_length (1,000); the client paces sends per room.
         if self.client is None:
             return SendResult(success=False, error="nodebb: not connected")
         try:
-            result = await self.client.send_chat_message(chat_id, text)
+            result = await self.client.send_chat_message(chat_id, content)
         except Exception as exc:
             return SendResult(success=False, error=f"nodebb: {exc}")
         mid = (result or {}).get("mid")
