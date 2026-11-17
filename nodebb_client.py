@@ -121,6 +121,41 @@ class NodeBBClient:
         )
         return data.get("messages", []) if isinstance(data, dict) else []
 
+    # -- forum reading (ticket #11) -------------------------------------
+    # Shapes verified against the NodeBB v4.16.8 OpenAPI specs: the v3
+    # routes wrap payloads in {"response": ...} (handled by request());
+    # the Read API routes (/api/topic, /api/search) return the bare
+    # object, which request() also tolerates.
+
+    async def get_categories(self) -> list:
+        data = await self.request("GET", "/api/v3/categories")
+        return data.get("categories", []) if isinstance(data, dict) else []
+
+    async def get_category_topics(self, cid, after: int = 0) -> list:
+        data = await self.request(
+            "GET", f"/api/v3/categories/{cid}/topics", params={"after": after}
+        )
+        return data.get("topics", []) if isinstance(data, dict) else []
+
+    async def get_topic(self, tid) -> dict:
+        data = await self.request("GET", f"/api/v3/topics/{tid}")
+        return data if isinstance(data, dict) else {}
+
+    async def get_topic_posts(self, tid) -> list:
+        # No v3 endpoint lists a topic's posts; the Read API topic route
+        # returns the topic object with its posts embedded.
+        data = await self.request("GET", f"/api/topic/{tid}")
+        return data.get("posts", []) if isinstance(data, dict) else []
+
+    async def get_post(self, pid) -> dict:
+        data = await self.request("GET", f"/api/v3/posts/{pid}")
+        return data if isinstance(data, dict) else {}
+
+    async def search(self, query: str) -> dict:
+        # Search exists only in the Read API (session or Bearer auth).
+        data = await self.request("GET", "/api/search", params={"query": query})
+        return data if isinstance(data, dict) else {}
+
     async def send_chat_message(self, room_id, message: str) -> dict:
         await self._pace(room_id)
         return await self.request(

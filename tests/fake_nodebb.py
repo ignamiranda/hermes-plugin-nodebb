@@ -68,6 +68,12 @@ class FakeNodeBB:
         r.add_get("/api/v3/chats/{room}/messages", self._messages)
         r.add_post("/api/v3/chats/{room}", self._send)
         r.add_post("/api/v3/chats/{room}/typing", self._typing)
+        r.add_get("/api/v3/categories", self._categories)
+        r.add_get("/api/v3/categories/{cid}/topics", self._category_topics)
+        r.add_get("/api/v3/topics/{tid}", self._topic)
+        r.add_get("/api/topic/{tid}", self._topic_read)
+        r.add_get("/api/v3/posts/{pid}", self._post)
+        r.add_get("/api/search", self._search)
         r.add_post("/__test__/emit", self._emit)
         r.add_post("/__test__/emit_notification", self._emit_notification)
         r.add_get("/__test__/sent", self._sent)
@@ -120,6 +126,69 @@ class FakeNodeBB:
         if not self._authed(request):
             return web.Response(status=403, text="Forbidden")
         return web.json_response({"response": {}})
+
+    # -- forum fixtures (ticket #11) ------------------------------------
+    CATEGORIES = [
+        {"cid": 5, "name": "Agents", "description": "swarm discussion"},
+        {"cid": 6, "name": "Private", "description": "sensitive"},
+    ]
+    TOPICS = [
+        {"tid": 42, "cid": 5, "uid": OWNER_UID, "title": "Hello thread", "mainPid": 1001},
+        {"tid": 43, "cid": 5, "uid": BOT_UID, "title": "Bot thread", "mainPid": 1003},
+    ]
+    TOPIC_POSTS = [
+        {"pid": 1001, "uid": OWNER_UID, "tid": 42, "content": "<p dir=\"auto\">first post</p>", "timestamp": 1700000002000, "deleted": 0},
+        {"pid": 1002, "uid": BOT_UID, "tid": 42, "content": "<p dir=\"auto\">second post about cats</p>", "timestamp": 1700000003000, "deleted": 0},
+    ]
+
+    async def _categories(self, request):
+        if not self._authed(request):
+            return web.Response(status=403, text="Forbidden")
+        return web.json_response({"response": {"categories": self.CATEGORIES}})
+
+    async def _category_topics(self, request):
+        if not self._authed(request):
+            return web.Response(status=403, text="Forbidden")
+        cid = int(request.match_info["cid"])
+        topics = [t for t in self.TOPICS if t["cid"] == cid]
+        return web.json_response({"response": {"topics": topics, "nextStart": 0}})
+
+    async def _topic(self, request):
+        if not self._authed(request):
+            return web.Response(status=403, text="Forbidden")
+        tid = int(request.match_info["tid"])
+        for t in self.TOPICS:
+            if t["tid"] == tid:
+                return web.json_response({"response": t})
+        return web.Response(status=404, text="Not Found")
+
+    async def _topic_read(self, request):
+        if not self._authed(request):
+            return web.Response(status=403, text="Forbidden")
+        tid = int(request.match_info["tid"])
+        for t in self.TOPICS:
+            if t["tid"] == tid:
+                body = dict(t)
+                body["posts"] = [p for p in self.TOPIC_POSTS if p["tid"] == tid]
+                return web.json_response(body)
+        return web.Response(status=404, text="Not Found")
+
+    async def _post(self, request):
+        if not self._authed(request):
+            return web.Response(status=403, text="Forbidden")
+        pid = int(request.match_info["pid"])
+        for p in self.TOPIC_POSTS:
+            if p["pid"] == pid:
+                return web.json_response({"response": p})
+        return web.Response(status=404, text="Not Found")
+
+    async def _search(self, request):
+        if not self._authed(request):
+            return web.Response(status=403, text="Forbidden")
+        query = (request.query.get("query") or "").lower()
+        posts = [p for p in self.TOPIC_POSTS if query in p["content"].lower()]
+        topics = [t for t in self.TOPICS if query in t["title"].lower()]
+        return web.json_response({"posts": posts, "topics": topics, "matchCount": len(posts) + len(topics)})
 
     async def _emit(self, request):
         payload = await request.json()

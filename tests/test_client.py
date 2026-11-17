@@ -65,3 +65,27 @@ def test_chats_messages_and_send():
         await client.close()
 
     run(scenario)
+
+def test_forum_reading_and_search():
+    """Ticket #11: categories, topics, posts, and search via the fake."""
+    async def scenario(fake, base):
+        client = NodeBBClient(base, "hermes", "test-pass", "test-token")
+        await client.login()
+        cats = await client.get_categories()
+        assert [c["cid"] for c in cats] == [5, 6]
+        topics = await client.get_category_topics(5)
+        assert [t["tid"] for t in topics] == [42, 43]
+        topic = await client.get_topic(42)
+        assert topic["title"] == "Hello thread"
+        posts = await client.get_topic_posts(42)
+        assert [p["pid"] for p in posts] == [1001, 1002]
+        post = await client.get_post(1002)
+        assert post["uid"] == 3 and "cats" in post["content"]
+        results = await client.search("cats")
+        assert [p["pid"] for p in results["posts"]] == [1002]
+        assert results["topics"] == []
+        results2 = await client.search("hello")
+        assert [t["tid"] for t in results2["topics"]] == [42]
+        await client.close()
+
+    run(scenario)
