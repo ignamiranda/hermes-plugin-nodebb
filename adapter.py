@@ -145,6 +145,7 @@ class NodeBBAdapter(BasePlatformAdapter):
         # Ticket #10: per-topic poll watermarks live in the same state
         # file under a reserved key, apart from the room watermarks.
         self._topic_seen: dict = _state.pop("topics", {})
+        self._topics_seeded: bool = bool(self._topic_seen)
         self._last_seen: dict = _state
         import asyncio
 
@@ -329,6 +330,9 @@ class NodeBBAdapter(BasePlatformAdapter):
         categories = self._watched_categories()
         if not categories:
             return
+        # Until the first pass completes, every topic is "first sight"
+        # and seeds silently (no replay flood on install or upgrade).
+        seed_only = not self._topics_seeded
         changed = False
         for cid in categories:
             try:
@@ -360,12 +364,32 @@ class NodeBBAdapter(BasePlatformAdapter):
                     continue
                 max_pid = max(int(p.get("pid", 0)) for p in posts)
                 if not seen:
-                    # First sight: seed only, do not replay the topic.
+                    # First sight: seed the watermark. During the seed
+                    # pass nothing is emitted; afterwards, a newly seen
+                    # topic is genuine new activity, so its latest post
+                    # (only that one — never the whole history) turns.
                     self._topic_seen[key] = {
                         "count": postcount,
                         "pid": max_pid,
                     }
                     changed = True
+                    if seed_only:
+                        continue
+                    latest = max(posts, key=lambda x: int(x.get("pid", 0)))
+                    if not latest.get(
+                        "deleted"
+                    ) and str(latest.get("uid")) != str(self._bot_uid):
+                        await self._on_socket_notification(
+                            {
+                                "nid": f"poll-{tid}-{latest.get('pid')}",
+                                "type": "poll",
+                                "from": latest.get("uid"),
+                                "tid": tid,
+                                "pid": latest.get("pid"),
+                                "bodyLong": latest.get("content"),
+                                "bodyShort": "",
+                            }
+                        )
                     continue
                 watermark = int(seen.get("pid") or 0)
                 missed = [
@@ -389,6 +413,7 @@ class NodeBBAdapter(BasePlatformAdapter):
                     )
                 self._topic_seen[key] = {"count": postcount, "pid": max_pid}
                 changed = True
+        self._topics_seeded = True
         if changed:
             self._save_state()
 
