@@ -146,6 +146,9 @@ class NodeBBAdapter(BasePlatformAdapter):
         # file under a reserved key, apart from the room watermarks.
         self._topic_seen: dict = _state.pop("topics", {})
         self._topics_seeded: bool = bool(self._topic_seen)
+        # Thread turns can arrive via the socket and via the polling
+        # fallback; this set drops the second arrival of the same post.
+        self._seen_thread_pids: set = set()
         self._last_seen: dict = _state
         import asyncio
 
@@ -433,6 +436,21 @@ class NodeBBAdapter(BasePlatformAdapter):
         if str(from_uid) not in self._allowed_uids():
             logger.info("nodebb: dropped thread notification from non-allowlisted uid %s", from_uid)
             return
+        pid = notification.get("pid")
+        if pid is not None:
+            # The same post can arrive twice: once as a socket
+            # notification (a mention) and once via the polling
+            # fallback. Post ids are globally unique, so the second
+            # arrival of a pid is always a duplicate turn.
+            if pid in self._seen_thread_pids:
+                logger.info(
+                    "nodebb: dropped duplicate thread notification pid=%s", pid
+                )
+                return
+            self._seen_thread_pids.add(pid)
+            if len(self._seen_thread_pids) > 2048:
+                self._seen_thread_pids.clear()
+                self._seen_thread_pids.add(pid)
         body = notification.get("bodyLong") or ""
         text = html_to_text(body) if body else (notification.get("bodyShort") or "").strip()
         if not text:
