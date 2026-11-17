@@ -61,6 +61,7 @@ def env_enablement_fn():
         "NODEBB_TOKEN": "token",
         "NODEBB_ALLOWED_USERS": "allowed_users",
         "NODEBB_HOME_CHANNEL": "home_channel",
+        "NODEBB_WATCHED_CATEGORIES": "watched_categories",
     }
     extra = {dest: os.environ[src] for src, dest in mapping.items() if os.environ.get(src)}
     home = extra.get("home_channel")
@@ -140,7 +141,11 @@ class NodeBBAdapter(BasePlatformAdapter):
         # backlog); afterwards, a room with no watermark replays from
         # the start so first messages in new rooms are not skipped.
         self._state_existed = self._state_path().exists()
-        self._last_seen: dict = self._load_state()
+        _state = self._load_state()
+        # Ticket #10: per-topic poll watermarks live in the same state
+        # file under a reserved key, apart from the room watermarks.
+        self._topic_seen: dict = _state.pop("topics", {})
+        self._last_seen: dict = _state
         import asyncio
 
         self.inbound_queue: asyncio.Queue = asyncio.Queue()
@@ -216,6 +221,7 @@ class NodeBBAdapter(BasePlatformAdapter):
                 if self.listener is not None:
                     await self.listener.enter_rooms(await self._room_ids())
                 await self._catchup()
+                await self._topic_catchup()
             except Exception as exc:
                 logger.error("nodebb: room refresh failed: %s", exc)
 
@@ -247,7 +253,9 @@ class NodeBBAdapter(BasePlatformAdapter):
         try:
             path = self._state_path()
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(self._last_seen))
+            path.write_text(
+                json.dumps({**self._last_seen, "topics": self._topic_seen})
+            )
         except Exception as exc:
             logger.debug("nodebb: catch-up state save failed: %s", exc)
 
@@ -293,6 +301,96 @@ class NodeBBAdapter(BasePlatformAdapter):
         # State now exists on disk: any room discovered later is new,
         # not install-time backlog, and must replay from watermark 0.
         self._state_existed = True
+
+    def _watched_categories(self) -> list:
+        raw = _extra(self._config, "watched_categories") or []
+        if isinstance(raw, str):
+            raw = raw.replace(";", ",").split(",")
+        categories = []
+        for item in raw:
+            try:
+                categories.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        return categories
+
+    async def _topic_catchup(self) -> None:
+        """Polling fallback for thread wake (ticket #10).
+
+        Sockets are the primary wake path; this catches watched-category
+        posts the socket missed. Per-topic watermarks (postcount + pid)
+        live in the catch-up state file; first sight of a topic seeds
+        the watermark without replaying it. New posts are fed through
+        the same notification path as socket events, so the allowlist
+        gate and thread session keying apply identically.
+        """
+        if self.client is None:
+            return
+        categories = self._watched_categories()
+        if not categories:
+            return
+        changed = False
+        for cid in categories:
+            try:
+                topics = await self.client.get_category_topics(cid)
+            except Exception as exc:
+                logger.error(
+                    "nodebb: topic catch-up list cid %s failed: %s", cid, exc
+                )
+                continue
+            for topic in topics:
+                tid = topic.get("tid")
+                if tid is None:
+                    continue
+                key = str(tid)
+                seen = self._topic_seen.get(key) or {}
+                postcount = int(topic.get("postcount") or 0)
+                if seen and postcount <= int(seen.get("count") or 0):
+                    continue
+                try:
+                    posts = await self.client.get_topic_posts(tid)
+                except Exception as exc:
+                    logger.error(
+                        "nodebb: topic catch-up fetch tid %s failed: %s",
+                        tid,
+                        exc,
+                    )
+                    continue
+                if not posts:
+                    continue
+                max_pid = max(int(p.get("pid", 0)) for p in posts)
+                if not seen:
+                    # First sight: seed only, do not replay the topic.
+                    self._topic_seen[key] = {
+                        "count": postcount,
+                        "pid": max_pid,
+                    }
+                    changed = True
+                    continue
+                watermark = int(seen.get("pid") or 0)
+                missed = [
+                    p
+                    for p in posts
+                    if int(p.get("pid", 0)) > watermark
+                    and not p.get("deleted")
+                    and str(p.get("uid")) != str(self._bot_uid)
+                ]
+                for p in sorted(missed, key=lambda x: int(x.get("pid", 0))):
+                    await self._on_socket_notification(
+                        {
+                            "nid": f"poll-{tid}-{p.get('pid')}",
+                            "type": "poll",
+                            "from": p.get("uid"),
+                            "tid": tid,
+                            "pid": p.get("pid"),
+                            "bodyLong": p.get("content"),
+                            "bodyShort": "",
+                        }
+                    )
+                self._topic_seen[key] = {"count": postcount, "pid": max_pid}
+                changed = True
+        if changed:
+            self._save_state()
 
     async def _on_socket_chat(self, room_id, from_uid, message) -> None:
         logger.info("nodebb: chat event room=%s from_uid=%s", room_id, from_uid)
