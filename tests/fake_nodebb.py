@@ -15,6 +15,7 @@ shapes (verified live against NodeBB v4.16.8):
 
 Test controls:
 - POST /__test__/emit  {roomId, fromUid, message, self}
+- POST /__test__/emit_notification  {notification, unreadCount}
 - GET  /__test__/sent  -> messages the plugin sent
 
 Credentials: username "hermes", password "test-pass", token "test-token".
@@ -68,6 +69,7 @@ class FakeNodeBB:
         r.add_post("/api/v3/chats/{room}", self._send)
         r.add_post("/api/v3/chats/{room}/typing", self._typing)
         r.add_post("/__test__/emit", self._emit)
+        r.add_post("/__test__/emit_notification", self._emit_notification)
         r.add_get("/__test__/sent", self._sent)
 
     async def _config(self, request):
@@ -122,6 +124,11 @@ class FakeNodeBB:
     async def _emit(self, request):
         payload = await request.json()
         await self.sio.emit("event:chats.receive", payload)
+        return web.json_response({"emitted": True})
+
+    async def _emit_notification(self, request):
+        payload = await request.json()
+        await self.sio.emit("event:new_notification", payload)
         return web.json_response({"emitted": True})
 
     async def _sent(self, request):
