@@ -178,6 +178,7 @@ class NodeBBAdapter(BasePlatformAdapter):
             self._on_socket_chat,
             on_reconnect=self._on_socket_reconnect,
             room_provider=self._room_ids,
+            on_notification=self._on_socket_notification,
         )
         try:
             await self.listener.start()
@@ -296,6 +297,40 @@ class NodeBBAdapter(BasePlatformAdapter):
     async def _on_socket_chat(self, room_id, from_uid, message) -> None:
         logger.info("nodebb: chat event room=%s from_uid=%s", room_id, from_uid)
         await self.inbound_queue.put((room_id, from_uid, message))
+
+    async def _on_socket_notification(self, notification) -> None:
+        """Ticket #10: a forum notification (a mention, or activity in a
+        watched category) becomes a turn in the thread's own session."""
+        if not isinstance(notification, dict):
+            return
+        tid = notification.get("tid")
+        if tid is None:
+            return  # not thread activity (follows and the like are not turns)
+        from_uid = notification.get("from")
+        if str(from_uid) not in self._allowed_uids():
+            logger.info("nodebb: dropped thread notification from non-allowlisted uid %s", from_uid)
+            return
+        body = notification.get("bodyLong") or ""
+        text = html_to_text(body) if body else (notification.get("bodyShort") or "").strip()
+        if not text:
+            return
+        logger.info(
+            "nodebb: thread notification type=%s tid=%s pid=%s from_uid=%s",
+            notification.get("type"), tid, notification.get("pid"), from_uid,
+        )
+        source = self.build_source(
+            chat_id=f"topic:{tid}",
+            chat_type="group",
+            user_id=str(from_uid),
+            user_name=str(from_uid),
+        )
+        event = MessageEvent(
+            text=text,
+            message_type=MessageType.TEXT,
+            source=source,
+            message_id=str(notification.get("pid") or notification.get("nid") or ""),
+        )
+        await self.handle_message(event)
 
     # -- inbound pipeline (ticket #4) ------------------------------------
 
