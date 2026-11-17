@@ -156,6 +156,39 @@ class NodeBBClient:
         data = await self.request("GET", "/api/search", params={"query": query})
         return data if isinstance(data, dict) else {}
 
+    # -- forum posting (ticket #12) -------------------------------------
+
+    async def reply_to_topic(self, tid, content: str, to_pid=None) -> dict:
+        payload = {"content": content}
+        if to_pid is not None:
+            payload["toPid"] = int(to_pid)
+        data = await self.request("POST", f"/api/v3/topics/{tid}", json=payload)
+        return data if isinstance(data, dict) else {}
+
+    async def create_topic(self, cid, title: str, content: str) -> dict:
+        data = await self.request(
+            "POST",
+            "/api/v3/topics",
+            json={"cid": int(cid), "title": title, "content": content},
+        )
+        return data if isinstance(data, dict) else {}
+
+    async def edit_post(self, pid, content: str) -> dict:
+        data = await self.request(
+            "PUT", f"/api/v3/posts/{pid}", json={"content": content}
+        )
+        return data if isinstance(data, dict) else {}
+
+    async def delete_post(self, pid) -> dict:
+        # NodeBB's own delete is a soft delete via the /state route; the
+        # bare DELETE /api/v3/posts/{pid} purges and is not used here.
+        data = await self.request("DELETE", f"/api/v3/posts/{pid}/state")
+        return data if isinstance(data, dict) else {}
+
+    async def restore_post(self, pid) -> dict:
+        data = await self.request("PUT", f"/api/v3/posts/{pid}/state")
+        return data if isinstance(data, dict) else {}
+
     async def send_chat_message(self, room_id, message: str) -> dict:
         await self._pace(room_id)
         return await self.request(

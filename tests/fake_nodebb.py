@@ -29,8 +29,10 @@ from aiohttp import web
 
 CSRF = "test-csrf"
 BOT_UID = 3
+BOT_USER = "hermes"
 OWNER_UID = 1
 ROOM_ID = 10
+BOT_PASS = "test-pass"
 
 MESSAGES = [
     {
@@ -57,6 +59,12 @@ MESSAGES = [
 class FakeNodeBB:
     def __init__(self):
         self.sent: list = []
+        # Ticket #12: per-instance mutable copies of the forum fixtures,
+        # so write endpoints mutate state without leaking between tests.
+        self.TOPICS = [dict(t) for t in self.TOPICS]
+        self.TOPIC_POSTS = [dict(p) for p in self.TOPIC_POSTS]
+        self._next_pid = 2000
+        self._next_tid = 100
         self._next_mid = 100
         self.sio = socketio.AsyncServer(async_mode="aiohttp", cors_allowed_origins="*")
         self.app = web.Application()
@@ -74,6 +82,11 @@ class FakeNodeBB:
         r.add_get("/api/topic/{tid}", self._topic_read)
         r.add_get("/api/v3/posts/{pid}", self._post)
         r.add_get("/api/search", self._search)
+        r.add_post("/api/v3/topics/{tid}", self._reply_topic)
+        r.add_post("/api/v3/topics", self._create_topic)
+        r.add_put("/api/v3/posts/{pid}", self._edit_post)
+        r.add_delete("/api/v3/posts/{pid}/state", self._delete_post_state)
+        r.add_put("/api/v3/posts/{pid}/state", self._restore_post_state)
         r.add_post("/__test__/emit", self._emit)
         r.add_post("/__test__/emit_notification", self._emit_notification)
         r.add_get("/__test__/sent", self._sent)
@@ -189,6 +202,88 @@ class FakeNodeBB:
         posts = [p for p in self.TOPIC_POSTS if query in p["content"].lower()]
         topics = [t for t in self.TOPICS if query in t["title"].lower()]
         return web.json_response({"posts": posts, "topics": topics, "matchCount": len(posts) + len(topics)})
+
+    # -- forum write handlers (ticket #12) -------------------------------
+
+    def _find_post(self, pid):
+        for p in self.TOPIC_POSTS:
+            if p["pid"] == pid:
+                return p
+        return None
+
+    async def _reply_topic(self, request):
+        if not self._authed(request):
+            return web.Response(status=403, text="Forbidden")
+        body = await request.json()
+        tid = int(request.match_info["tid"])
+        self._next_pid += 1
+        post = {
+            "pid": self._next_pid,
+            "uid": BOT_UID,
+            "tid": tid,
+            "content": body.get("content"),
+            "timestamp": 1700000004000,
+            "deleted": 0,
+        }
+        if body.get("toPid") is not None:
+            post["toPid"] = body["toPid"]
+        self.TOPIC_POSTS.append(post)
+        index = len([p for p in self.TOPIC_POSTS if p["tid"] == tid])
+        return web.json_response({"response": dict(post, index=index)})
+
+    async def _create_topic(self, request):
+        if not self._authed(request):
+            return web.Response(status=403, text="Forbidden")
+        body = await request.json()
+        self._next_tid += 1
+        self._next_pid += 1
+        topic = {
+            "tid": self._next_tid,
+            "cid": body.get("cid"),
+            "uid": BOT_UID,
+            "title": body.get("title"),
+            "mainPid": self._next_pid,
+        }
+        post = {
+            "pid": self._next_pid,
+            "uid": BOT_UID,
+            "tid": self._next_tid,
+            "content": body.get("content"),
+            "timestamp": 1700000005000,
+            "deleted": 0,
+        }
+        self.TOPICS.append(topic)
+        self.TOPIC_POSTS.append(post)
+        return web.json_response({"response": dict(topic, mainPost=post)})
+
+    async def _edit_post(self, request):
+        if not self._authed(request):
+            return web.Response(status=403, text="Forbidden")
+        post = self._find_post(int(request.match_info["pid"]))
+        if post is None:
+            return web.Response(status=404, text="Not Found")
+        body = await request.json()
+        post["content"] = body.get("content")
+        post["edited"] = 1700000006000
+        return web.json_response({"response": post})
+
+    async def _delete_post_state(self, request):
+        if not self._authed(request):
+            return web.Response(status=403, text="Forbidden")
+        post = self._find_post(int(request.match_info["pid"]))
+        if post is None:
+            return web.Response(status=404, text="Not Found")
+        post["deleted"] = 1
+        return web.json_response({"response": {}})
+
+    async def _restore_post_state(self, request):
+        if not self._authed(request):
+            return web.Response(status=403, text="Forbidden")
+        post = self._find_post(int(request.match_info["pid"]))
+        if post is None:
+            return web.Response(status=404, text="Not Found")
+        post["deleted"] = 0
+        return web.json_response({"response": {}})
 
     async def _emit(self, request):
         payload = await request.json()

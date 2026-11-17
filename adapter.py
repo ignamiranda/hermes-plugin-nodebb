@@ -409,6 +409,20 @@ class NodeBBAdapter(BasePlatformAdapter):
         # max_message_length (1,000); the client paces sends per room.
         if self.client is None:
             return SendResult(success=False, error="nodebb: not connected")
+        if str(chat_id).startswith("topic:"):
+            # Thread session (ticket #10): the reply posts into the
+            # topic; reply_to names the post being quoted (ticket #12).
+            tid = str(chat_id).split(":", 1)[1]
+            try:
+                result = await self.client.reply_to_topic(
+                    tid, content, to_pid=kwargs.get("reply_to")
+                )
+            except Exception as exc:
+                return SendResult(success=False, error=f"nodebb: {exc}")
+            pid = (result or {}).get("pid")
+            return SendResult(
+                success=True, message_id=str(pid) if pid is not None else None
+            )
         try:
             result = await self.client.send_chat_message(chat_id, content)
         except Exception as exc:
@@ -429,6 +443,12 @@ class NodeBBAdapter(BasePlatformAdapter):
         return None
 
     async def get_chat_info(self, chat_id) -> dict:
+        if str(chat_id).startswith("topic:"):
+            return {
+                "name": f"topic {str(chat_id).split(':', 1)[1]}",
+                "type": "group",
+                "chat_id": str(chat_id),
+            }
         if self.client is not None:
             try:
                 for room in await self.client.get_chats():
